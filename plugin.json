@@ -1,0 +1,12 @@
+{
+  "id": "stem-output-router",
+  "name": "Stem Output Router",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Enumerates audio output devices as groundwork for routing Slopsmith stem submixes.",
+  "author": "Mitchell",
+  "settings": {
+    "html": "settings.html"
+  },
+  "script": "screen.js"
+}
