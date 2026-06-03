@@ -45,6 +45,12 @@
   let routingGraph = null;
   let testToneContext = null;
   let metronomeState = null;
+  let routingShouldResume = false;
+  let deferredApplyGeneration = 0;
+  let routingRestoreWindowHooksInstalled = false;
+  let routingRestoreBusHooksInstalled = false;
+  let routingRestoreBusHookRetryTimer = null;
+  let routingRestoreBusHookAttempts = 0;
 
   function safeStorageGet(key) {
     try {
@@ -785,6 +791,8 @@
   }
 
   function releaseRouting() {
+    routingShouldResume = false;
+    cancelDeferredApplyRouting();
     state.error = "Reload the song to restore the original Stems plugin master graph.";
     state.status = state.routingActive ? "Routing remains active" : "Routing released";
     renderAll();
@@ -793,11 +801,14 @@
   function hardReleaseRoutingForReload() {
     disposeRoutingGraph();
     state.routingActive = false;
+    routingShouldResume = false;
+    cancelDeferredApplyRouting();
     state.status = "Routing released";
     state.error = "";
   }
 
-  function applyRouting() {
+  function applyRouting(options) {
+    const applyOptions = options || {};
     refreshStemState();
     const context = getRoutingContext();
     const hasAssignedRoute = state.routingActive || state.stems.some((stem) => (
@@ -813,7 +824,7 @@
       state.error = "Load a stem-backed song with the Stems plugin active, then assign at least one stem to a playback channel pair.";
       state.status = "Routing unavailable";
       renderAll();
-      return;
+      return false;
     }
 
     disposeRoutingGraph();
@@ -846,10 +857,123 @@
     merger.connect(context.destination);
     routingGraph = { context, createdNodes };
     state.routingActive = true;
+    if (!applyOptions.deferred) {
+      routingShouldResume = true;
+    }
     state.pendingChanges = false;
-    state.status = "Routing active";
+    state.status = applyOptions.deferred ? "Routing restored" : "Routing active";
     state.error = "";
     renderAll();
+    return true;
+  }
+
+  function sameStemRefs(left, right) {
+    if (!left || !right || left.length !== right.length) {
+      return false;
+    }
+    for (let i = 0; i < left.length; i += 1) {
+      if (left[i].id !== right[i].id || left[i].gain !== right[i].gain) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function currentRealRoutableStems() {
+    return state.stems.filter((stem) => stem.id !== METRONOME_ID && stem.gain && stem.context);
+  }
+
+  function tryDeferredApplyRouting(generation, attempt, previousStems, stableCount) {
+    if (generation !== deferredApplyGeneration || !routingShouldResume) {
+      return;
+    }
+
+    refreshStemState();
+    const realStems = currentRealRoutableStems();
+    const context = getRoutingContext();
+    const hasReadyGraph = Boolean(context && realStems.length && state.playbackChannels >= 2);
+    const nextStableCount = hasReadyGraph && sameStemRefs(previousStems, realStems) ? stableCount + 1 : 0;
+
+    if (hasReadyGraph && nextStableCount >= 3) {
+      applyRouting({ deferred: true });
+      return;
+    }
+
+    if (attempt >= 30) {
+      state.status = "Routing restore waiting";
+      state.error = "Stems were not ready for automatic routing restore. Click Apply Routing after the song finishes loading.";
+      renderAll();
+      return;
+    }
+
+    setTimeout(() => {
+      tryDeferredApplyRouting(generation, attempt + 1, realStems, nextStableCount);
+    }, 200);
+  }
+
+  function scheduleDeferredApplyRouting() {
+    if (!routingShouldResume) {
+      return;
+    }
+    deferredApplyGeneration += 1;
+    const generation = deferredApplyGeneration;
+    setTimeout(() => {
+      tryDeferredApplyRouting(generation, 0, null, 0);
+    }, 250);
+  }
+
+  function cancelDeferredApplyRouting() {
+    deferredApplyGeneration += 1;
+  }
+
+  function addSlopsmithListener(eventName, handler) {
+    const slopsmith = window.slopsmith;
+    if (!slopsmith || typeof slopsmith.on !== "function") {
+      return false;
+    }
+    try {
+      slopsmith.on(eventName, handler);
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function installRoutingRestoreHooks() {
+    if (!routingRestoreWindowHooksInstalled) {
+      window.addEventListener("song:loading", cancelDeferredApplyRouting);
+      window.addEventListener("song:unloaded", cancelDeferredApplyRouting);
+      window.addEventListener("song:closed", cancelDeferredApplyRouting);
+      window.addEventListener("song:loaded", scheduleDeferredApplyRouting);
+      window.addEventListener("song:ready", scheduleDeferredApplyRouting);
+      window.addEventListener("stems:ready", scheduleDeferredApplyRouting);
+      routingRestoreWindowHooksInstalled = true;
+    }
+
+    if (!routingRestoreBusHooksInstalled) {
+      const installedLoading = addSlopsmithListener("song:loading", cancelDeferredApplyRouting);
+      const installedUnloaded = addSlopsmithListener("song:unloaded", cancelDeferredApplyRouting);
+      const installedClosed = addSlopsmithListener("song:closed", cancelDeferredApplyRouting);
+      const installedLoaded = addSlopsmithListener("song:loaded", scheduleDeferredApplyRouting);
+      const installedReady = addSlopsmithListener("song:ready", scheduleDeferredApplyRouting);
+      const installedStemsReady = addSlopsmithListener("stems:ready", scheduleDeferredApplyRouting);
+      routingRestoreBusHooksInstalled = (
+        installedLoading ||
+        installedUnloaded ||
+        installedClosed ||
+        installedLoaded ||
+        installedReady ||
+        installedStemsReady
+      );
+    }
+
+    if (!routingRestoreBusHooksInstalled && !routingRestoreBusHookRetryTimer && routingRestoreBusHookAttempts < 20) {
+      routingRestoreBusHookAttempts += 1;
+      routingRestoreBusHookRetryTimer = setTimeout(() => {
+        routingRestoreBusHookRetryTimer = null;
+        installRoutingRestoreHooks();
+      }, 500);
+    }
   }
 
   async function getBrowserOutputs() {
@@ -1358,6 +1482,7 @@
 
   function mountExistingRoots() {
     installStyle();
+    installRoutingRestoreHooks();
     mountPlayerRouterPanel();
     mountPlayerRouterControl();
     document.querySelectorAll(ROOT_SELECTOR).forEach(bindRoot);
