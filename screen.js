@@ -15,6 +15,7 @@
   const MAIN_MIX_ROUTE = "main";
   const MUTE_ROUTE = "mute";
   const METRONOME_ID = "metronome";
+  const METRONOME_SETTINGS_KEY = "slopsmithMetronomeSettings";
 
   const state = {
     browserOutputs: [],
@@ -455,6 +456,49 @@
     }
   }
 
+  function getSlopsmithMetronomeSettings() {
+    const existing = window[METRONOME_SETTINGS_KEY];
+    if (existing && typeof existing === "object") {
+      if (!Number.isFinite(Number(existing.volume))) {
+        existing.volume = 0.4;
+      }
+      return existing;
+    }
+    const settings = {
+      enabled: false,
+      volume: 0.4,
+      flashEnabled: true
+    };
+    window[METRONOME_SETTINGS_KEY] = settings;
+    return settings;
+  }
+
+  function getSlopsmithMetronomeVolume() {
+    const volume = Number(getSlopsmithMetronomeSettings().volume);
+    if (!Number.isFinite(volume)) {
+      return 0.4;
+    }
+    return Math.min(1, Math.max(0, volume));
+  }
+
+  function setStereoNode(node) {
+    if (!node) {
+      return node;
+    }
+    setDiscrete(node);
+    try {
+      node.channelCountMode = "explicit";
+    } catch (_error) {
+      // Some node implementations keep this read-only.
+    }
+    try {
+      node.channelCount = 2;
+    } catch (_error) {
+      // Some node implementations keep this read-only.
+    }
+    return node;
+  }
+
   function disposeMetronome() {
     if (!metronomeState) {
       return;
@@ -474,7 +518,7 @@
       disposeMetronome();
     }
     if (!metronomeState) {
-      const output = setDiscrete(context.createGain());
+      const output = setStereoNode(context.createGain());
       output.gain.value = 1;
       metronomeState = {
         context,
@@ -487,11 +531,11 @@
     }
     return {
       id: METRONOME_ID,
-      label: "metronome",
+      label: "Slopsmith metronome",
       gain: metronomeState.output,
       context,
       routed: state.routes[METRONOME_ID] || MUTE_ROUTE,
-      synthetic: true
+      metronome: true
     };
   }
 
@@ -499,21 +543,30 @@
     if (!metronomeState) {
       return;
     }
+    const volume = getSlopsmithMetronomeVolume();
+    if (volume <= 0) {
+      return;
+    }
     const context = metronomeState.context;
     const osc = context.createOscillator();
     const env = setDiscrete(context.createGain());
+    const stereo = setStereoNode(context.createChannelMerger(2));
     const isMeasure = Number(beat.measure) >= 0;
-    osc.frequency.value = isMeasure ? 1320 : 880;
+    osc.frequency.value = isMeasure ? 1500 : 1000;
+    osc.type = "sine";
     env.gain.setValueAtTime(0.0001, when);
-    env.gain.exponentialRampToValueAtTime(isMeasure ? 0.32 : 0.20, when + 0.006);
-    env.gain.exponentialRampToValueAtTime(0.0001, when + 0.055);
+    env.gain.exponentialRampToValueAtTime(volume, when + 0.006);
+    env.gain.exponentialRampToValueAtTime(0.0001, when + 0.06);
     osc.connect(env);
-    env.connect(metronomeState.output);
+    env.connect(stereo, 0, 0);
+    env.connect(stereo, 0, 1);
+    stereo.connect(metronomeState.output);
     osc.start(when);
-    osc.stop(when + 0.07);
+    osc.stop(when + 0.08);
     osc.onended = () => {
       disconnectNode(osc);
       disconnectNode(env);
+      disconnectNode(stereo);
     };
   }
 
@@ -1090,7 +1143,7 @@
     if (!state.stems.length) {
       const empty = document.createElement("div");
       empty.className = "stem-output-router__empty stem-output-router__muted";
-      empty.textContent = "Load a .sloppak song and activate the Stems plugin to route vocals, guitars, bass, drums, piano, other, or the synthetic metronome.";
+      empty.textContent = "Load a .sloppak song and activate the Stems plugin to route vocals, guitars, bass, drums, piano, other, or the Slopsmith metronome.";
       list.replaceChildren(empty);
       return;
     }
@@ -1121,7 +1174,7 @@
 
     const note = document.createElement("div");
     note.className = "stem-output-router__note";
-    note.textContent = "Apply Routing sends active stems plus the synthetic metronome through this plugin's channel graph. Mute test uses a silent gain path. Reload the song to fully restore the Stems plugin graph.";
+    note.textContent = "Apply Routing sends active stems plus the Slopsmith metronome through this plugin's channel graph. The metronome source follows Slopsmith's metronome volume control. Mute test uses a silent gain path. Reload the song to fully restore the Stems plugin graph.";
     list.replaceChildren(note, ...rows);
   }
 
