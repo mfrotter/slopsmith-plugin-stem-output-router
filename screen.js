@@ -14,6 +14,7 @@
   const PLAYER_CONTROL_ID = "stem-output-router-player-control";
   const MAIN_MIX_ROUTE = "main";
   const MUTE_ROUTE = "mute";
+  const METRONOME_ID = "metronome";
 
   const state = {
     browserOutputs: [],
@@ -42,6 +43,7 @@
 
   let routingGraph = null;
   let testToneContext = null;
+  let metronomeState = null;
 
   function safeStorageGet(key) {
     try {
@@ -276,8 +278,11 @@
         align-items: center;
         display: inline-flex;
         flex: 0 0 auto;
-        margin: 0 4px;
-        position: relative;
+        bottom: 14px;
+        margin: 0;
+        position: fixed;
+        right: 14px;
+        z-index: 10001;
       }
       .stem-output-router-player__toggle {
         background: rgba(20, 184, 166, 0.18);
@@ -339,6 +344,10 @@
         .stem-output-router-player-panel {
           bottom: 58px;
           left: 10px;
+          right: 10px;
+        }
+        .stem-output-router-player {
+          bottom: 10px;
           right: 10px;
         }
       }
@@ -408,10 +417,161 @@
     }
   }
 
+  function getHighwayApi() {
+    return window.highway || window._slopsmithHighway || null;
+  }
+
+  function getSongTime() {
+    const audio = document.getElementById("audio");
+    if (audio && Number.isFinite(Number(audio.currentTime))) {
+      return Math.max(0, Number(audio.currentTime));
+    }
+    const highway = getHighwayApi();
+    if (highway && typeof highway.getCurrentTime === "function") {
+      const time = Number(highway.getCurrentTime());
+      return Number.isFinite(time) ? Math.max(0, time) : 0;
+    }
+    return 0;
+  }
+
+  function isSongPlaying() {
+    const audio = document.getElementById("audio");
+    if (audio && typeof audio.paused === "boolean") {
+      return !audio.paused;
+    }
+    return false;
+  }
+
+  function getBeatGrid() {
+    const highway = getHighwayApi();
+    if (!highway || typeof highway.getBeats !== "function") {
+      return [];
+    }
+    try {
+      const beats = highway.getBeats();
+      return Array.isArray(beats) ? beats : [];
+    } catch (_error) {
+      return [];
+    }
+  }
+
+  function disposeMetronome() {
+    if (!metronomeState) {
+      return;
+    }
+    if (metronomeState.timer) {
+      clearInterval(metronomeState.timer);
+    }
+    disconnectNode(metronomeState.output);
+    metronomeState = null;
+  }
+
+  function createMetronomeStem(context) {
+    if (!context) {
+      return null;
+    }
+    if (metronomeState && metronomeState.context !== context) {
+      disposeMetronome();
+    }
+    if (!metronomeState) {
+      const output = setDiscrete(context.createGain());
+      output.gain.value = 1;
+      metronomeState = {
+        context,
+        output,
+        timer: null,
+        scheduledBeatKeys: new Set(),
+        lastSongTime: -1
+      };
+      state.routes[METRONOME_ID] = state.routes[METRONOME_ID] || MUTE_ROUTE;
+    }
+    return {
+      id: METRONOME_ID,
+      label: "metronome",
+      gain: metronomeState.output,
+      context,
+      routed: state.routes[METRONOME_ID] || MUTE_ROUTE,
+      synthetic: true
+    };
+  }
+
+  function scheduleMetronomeClick(beat, when) {
+    if (!metronomeState) {
+      return;
+    }
+    const context = metronomeState.context;
+    const osc = context.createOscillator();
+    const env = setDiscrete(context.createGain());
+    const isMeasure = Number(beat.measure) >= 0;
+    osc.frequency.value = isMeasure ? 1320 : 880;
+    env.gain.setValueAtTime(0.0001, when);
+    env.gain.exponentialRampToValueAtTime(isMeasure ? 0.32 : 0.20, when + 0.006);
+    env.gain.exponentialRampToValueAtTime(0.0001, when + 0.055);
+    osc.connect(env);
+    env.connect(metronomeState.output);
+    osc.start(when);
+    osc.stop(when + 0.07);
+    osc.onended = () => {
+      disconnectNode(osc);
+      disconnectNode(env);
+    };
+  }
+
+  function tickMetronomeScheduler() {
+    if (!metronomeState || !isSongPlaying()) {
+      return;
+    }
+    const beats = getBeatGrid();
+    if (!beats.length) {
+      return;
+    }
+    const context = metronomeState.context;
+    const songTime = getSongTime();
+    if (songTime < metronomeState.lastSongTime - 0.25) {
+      metronomeState.scheduledBeatKeys.clear();
+    }
+    metronomeState.lastSongTime = songTime;
+
+    const lookahead = 0.18;
+    const start = songTime - 0.015;
+    const end = songTime + lookahead;
+    for (let i = 0; i < beats.length; i += 1) {
+      const beat = beats[i];
+      const beatTime = Number(beat.time);
+      if (!Number.isFinite(beatTime) || beatTime < start || beatTime > end) {
+        continue;
+      }
+      const key = `${i}:${beatTime.toFixed(3)}`;
+      if (metronomeState.scheduledBeatKeys.has(key)) {
+        continue;
+      }
+      metronomeState.scheduledBeatKeys.add(key);
+      const when = context.currentTime + Math.max(0.005, beatTime - songTime);
+      scheduleMetronomeClick(beat, when);
+    }
+
+    if (metronomeState.scheduledBeatKeys.size > 512) {
+      metronomeState.scheduledBeatKeys = new Set(Array.from(metronomeState.scheduledBeatKeys).slice(-256));
+    }
+  }
+
+  function ensureMetronomeScheduler() {
+    if (!metronomeState || metronomeState.timer) {
+      return;
+    }
+    metronomeState.timer = setInterval(tickMetronomeScheduler, 40);
+  }
+
   function refreshStemState() {
-    state.stems = getStemApiState()
+    const realStems = getStemApiState()
       .map(normalizeStem)
       .filter((stem) => stem.id && stem.gain && stem.context);
+    const contextStem = realStems.find((stem) => stem.context);
+    const metronomeStem = createMetronomeStem(contextStem ? contextStem.context : null);
+    state.stems = metronomeStem ? realStems.concat(metronomeStem) : realStems;
+    if (metronomeStem) {
+      ensureMetronomeScheduler();
+    }
     const context = getRoutingContext();
     state.autoPlaybackChannels = detectPlaybackChannels(context);
     state.playbackChannels = state.manualChannels || state.autoPlaybackChannels;
@@ -473,6 +633,11 @@
       return;
     }
     try {
+      context.destination.channelInterpretation = "discrete";
+    } catch (_error) {
+      // Some destinations keep interpretation read-only.
+    }
+    try {
       context.destination.channelCountMode = "explicit";
     } catch (_error) {
       // Some AudioDestinationNode implementations keep this read-only.
@@ -482,6 +647,18 @@
     } catch (_error) {
       // Chromium throws if the selected output cannot expose this many channels.
     }
+  }
+
+  function setDiscrete(node) {
+    if (!node) {
+      return node;
+    }
+    try {
+      node.channelInterpretation = "discrete";
+    } catch (_error) {
+      // Older node implementations may not allow changing this.
+    }
+    return node;
   }
 
   function disconnectNode(node) {
@@ -527,8 +704,8 @@
     }
 
     const osc = context.createOscillator();
-    const gain = context.createGain();
-    const merger = context.createChannelMerger(channels);
+    const gain = setDiscrete(context.createGain());
+    const merger = setDiscrete(context.createChannelMerger(channels));
     osc.frequency.value = 880;
     gain.gain.value = 0.18;
     osc.connect(gain);
@@ -590,14 +767,14 @@
     const channels = Math.max(state.playbackChannels, ...routedStems.flatMap((entry) => entry.route).map((index) => index + 1));
     setDestinationChannels(context, channels);
 
-    const merger = context.createChannelMerger(channels);
+    const merger = setDiscrete(context.createChannelMerger(channels));
     const createdNodes = [merger];
     for (const entry of routedStems) {
       disconnectNode(entry.stem.gain);
-      const splitter = context.createChannelSplitter(2);
+      const splitter = setDiscrete(context.createChannelSplitter(2));
       createdNodes.push(splitter);
       if (entry.mute) {
-        const muteGain = context.createGain();
+        const muteGain = setDiscrete(context.createGain());
         muteGain.gain.value = 0;
         createdNodes.push(muteGain);
         entry.stem.gain.connect(muteGain);
@@ -775,7 +952,7 @@
       return;
     }
     status.replaceChildren(
-      makeBadge("Stems plugin", state.stems.length ? `${state.stems.length} stems active` : "No active stems"),
+      makeBadge("Routable sources", state.stems.length ? `${state.stems.length} active` : "No active sources"),
       makeBadge("Playback channels", state.manualChannels ? `${state.playbackChannels} forced` : (state.playbackChannels ? `${state.playbackChannels} exposed` : "Unknown")),
       makeBadge("Routing", state.pendingChanges ? "Changes pending" : (state.routingActive ? "Active" : "Released")),
       makeBadge("Browser outputs", state.capabilities.enumerateDevices ? `${state.browserOutputs.length} detected` : "Not supported"),
@@ -913,7 +1090,7 @@
     if (!state.stems.length) {
       const empty = document.createElement("div");
       empty.className = "stem-output-router__empty stem-output-router__muted";
-      empty.textContent = "Load a .sloppak song and activate the Stems plugin to route vocals, guitars, bass, drums, piano, or other stems.";
+      empty.textContent = "Load a .sloppak song and activate the Stems plugin to route vocals, guitars, bass, drums, piano, other, or the synthetic metronome.";
       list.replaceChildren(empty);
       return;
     }
@@ -944,7 +1121,7 @@
 
     const note = document.createElement("div");
     note.className = "stem-output-router__note";
-    note.textContent = "Apply Routing detaches the active stems from the normal Stems master bus and sends them through this plugin's channel graph. Mute test uses a silent gain path so reintroducing a stem does not leave it disconnected. Reload the song to fully restore the Stems plugin graph.";
+    note.textContent = "Apply Routing sends active stems plus the synthetic metronome through this plugin's channel graph. Mute test uses a silent gain path. Reload the song to fully restore the Stems plugin graph.";
     list.replaceChildren(note, ...rows);
   }
 
@@ -954,7 +1131,7 @@
       const stemCount = state.stems.length;
       const channelCount = state.playbackChannels || 0;
       const suffix = state.error ? `: ${state.error}` : "";
-      summary.textContent = `${state.status}. Stems ${stemCount}, playback channels ${channelCount}${suffix}`;
+      summary.textContent = `${state.status}. Stems ${stemCount}, playback channels ${channelCount}, auto ${state.autoPlaybackChannels || "unknown"}${suffix}`;
     }
 
     const refreshButton = root.querySelector('[data-action="refresh"]');
@@ -1119,17 +1296,11 @@
     if (document.getElementById(PLAYER_CONTROL_ID)) {
       return;
     }
-    const controls = document.getElementById("player-controls");
-    if (!controls) {
+    if (!document.body) {
       return;
     }
     const host = createPlayerRouterControl();
-    const separator = controls.querySelector("span.text-gray-700");
-    if (separator) {
-      controls.insertBefore(host, separator);
-    } else {
-      controls.appendChild(host);
-    }
+    document.body.appendChild(host);
   }
 
   function mountExistingRoots() {
@@ -1153,7 +1324,6 @@
     mountExistingRoots();
     startObserver();
     updateCapabilities();
-    refreshStemState();
     renderAll();
   }
 

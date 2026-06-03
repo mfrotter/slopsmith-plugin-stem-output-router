@@ -10,8 +10,11 @@ This pass enumerates:
 - Slopsmith/native output APIs if the host exposes a compatible list method
 - Active stem gain nodes from the Stems plugin via `window.stems.getState()`
 - Playback channel pairs exposed by the active Web Audio output destination
+- A synthetic `metronome` source generated from Slopsmith's beat grid
 
 When the Stems plugin is active on a stem-backed `.sloppak`, this plugin can detach selected stem gain nodes from the normal Stems master mix and route them through a `ChannelMergerNode` to playback pairs such as 1/2, 3/4, 5/6, and 7/8.
+
+The synthetic metronome defaults to muted. Route it to a playback pair and click **Apply Routing** to hear click pulses on song beats.
 
 The plugin also adds a compact **Routes** control to Slopsmith's player controls so routes can be edited while a song is playing.
 
