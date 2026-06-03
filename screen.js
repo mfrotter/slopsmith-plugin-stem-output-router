@@ -279,7 +279,7 @@
         align-items: center;
         display: inline-flex;
         flex: 0 0 auto;
-        bottom: 14px;
+        bottom: 76px;
         margin: 0;
         position: fixed;
         right: 14px;
@@ -306,7 +306,7 @@
         border: 1px solid rgba(148, 163, 184, 0.35);
         border-radius: 8px;
         box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
-        bottom: 72px;
+        bottom: 116px;
         left: 12px;
         margin-left: auto;
         margin-right: auto;
@@ -343,12 +343,12 @@
           width: 100%;
         }
         .stem-output-router-player-panel {
-          bottom: 58px;
+          bottom: 104px;
           left: 10px;
           right: 10px;
         }
         .stem-output-router-player {
-          bottom: 10px;
+          bottom: 66px;
           right: 10px;
         }
       }
