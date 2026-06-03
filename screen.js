@@ -15,7 +15,7 @@
   const MAIN_MIX_ROUTE = "main";
   const MUTE_ROUTE = "mute";
   const METRONOME_ID = "metronome";
-  const METRONOME_SETTINGS_KEY = "slopsmithMetronomeSettings";
+  const ROUTED_METRONOME_VOLUME = 1;
 
   const state = {
     browserOutputs: [],
@@ -462,29 +462,8 @@
     }
   }
 
-  function getSlopsmithMetronomeSettings() {
-    const existing = window[METRONOME_SETTINGS_KEY];
-    if (existing && typeof existing === "object") {
-      if (!Number.isFinite(Number(existing.volume))) {
-        existing.volume = 0.4;
-      }
-      return existing;
-    }
-    const settings = {
-      enabled: false,
-      volume: 0.4,
-      flashEnabled: true
-    };
-    window[METRONOME_SETTINGS_KEY] = settings;
-    return settings;
-  }
-
-  function getSlopsmithMetronomeVolume() {
-    const volume = Number(getSlopsmithMetronomeSettings().volume);
-    if (!Number.isFinite(volume)) {
-      return 0.4;
-    }
-    return Math.min(1, Math.max(0, volume));
+  function getRoutedMetronomeVolume() {
+    return ROUTED_METRONOME_VOLUME;
   }
 
   function setStereoNode(node) {
@@ -549,7 +528,7 @@
     if (!metronomeState) {
       return;
     }
-    const volume = getSlopsmithMetronomeVolume();
+    const volume = getRoutedMetronomeVolume();
     if (volume <= 0) {
       return;
     }
@@ -668,10 +647,11 @@
     for (let channel = 1; channel <= channels; channel += 2) {
       const right = channel + 1;
       if (right <= channels) {
-        options.push({ value: `${channel}-${right}`, label: `Playback ${channel}/${right}` });
-      } else {
-        options.push({ value: `${channel}`, label: `Playback ${channel}` });
+        options.push({ value: `${channel}-${right}`, label: `Playback ${channel}/${right} stereo` });
       }
+    }
+    for (let channel = 1; channel <= channels; channel += 1) {
+      options.push({ value: `${channel}`, label: `Playback ${channel} mono` });
     }
     return options;
   }
@@ -846,11 +826,19 @@
       } else {
         entry.stem.gain.connect(splitter);
       }
-      splitter.connect(merger, 0, entry.route[0]);
       if (entry.route.length > 1) {
+        splitter.connect(merger, 0, entry.route[0]);
         splitter.connect(merger, 1, entry.route[1]);
       } else {
-        splitter.connect(merger, 0, entry.route[0]);
+        const leftFold = setDiscrete(context.createGain());
+        const rightFold = setDiscrete(context.createGain());
+        leftFold.gain.value = 0.5;
+        rightFold.gain.value = 0.5;
+        createdNodes.push(leftFold, rightFold);
+        splitter.connect(leftFold, 0);
+        splitter.connect(rightFold, 1);
+        leftFold.connect(merger, 0, entry.route[0]);
+        rightFold.connect(merger, 0, entry.route[0]);
       }
     }
 
@@ -1298,7 +1286,7 @@
 
     const note = document.createElement("div");
     note.className = "stem-output-router__note";
-    note.textContent = "Apply Routing sends active stems plus the Slopsmith metronome through this plugin's channel graph. The metronome source follows Slopsmith's metronome volume control. Mute test uses a silent gain path. Reload the song to fully restore the Stems plugin graph.";
+    note.textContent = "Apply Routing sends active stems plus the Slopsmith metronome through this plugin's channel graph. The routed metronome source uses full volume. Mute test uses a silent gain path. Reload the song to fully restore the Stems plugin graph.";
     list.replaceChildren(note, ...rows);
   }
 
